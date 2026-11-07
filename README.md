@@ -50,3 +50,7 @@ Deploy it to any Node host (Render, Railway, Fly.io, a school server) and set:
 Drag a note to move it. Hover over a note and click ✕ to remove it.
 
 Walls are stored as files in the `data/` folder.
+
+## Updating the online site
+
+The Render service is linked to this GitHub repository, so every change pushed to `main` goes live automatically within a couple of minutes.
