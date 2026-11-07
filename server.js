@@ -138,6 +138,7 @@ const server = http.createServer(async (req, res) => {
       if ((r = m(/^\/wall\/([A-Z0-9]{5})$/))) return serveFile(res, isTeacher(req) ? 'wall.html' : 'login.html');
       if (m(/^\/(s|j)\/[A-Za-z0-9]{5}$/)) return serveFile(res, 'student.html');
       if (p === '/join') return serveFile(res, 'join.html');
+      if (p === '/healthz') return send(res, 200, 'ok', 'text/plain');
       if (m(/^\/[\w-]+\.(css|js|svg|png)$/)) return serveFile(res, p.slice(1));
     }
 

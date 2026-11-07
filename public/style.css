@@ -28,7 +28,10 @@ label { font-weight: 600; display: block; margin: .8em 0 .3em; }
 .note .who { position: absolute; left: 14px; bottom: 6px; font-size: .78rem; color: rgba(0,0,0,.55); font-weight: 600; }
 .note .del { position: absolute; top: 4px; right: 4px; width: 26px; height: 26px; padding: 0; border-radius: 50%;
   background: rgba(0,0,0,.12); color: #000; display: none; font-size: 14px; line-height: 26px; }
-.note:hover .del { display: block; }
+@media (hover: hover) { .note:hover .del { display: block; } }
+.note.selected { outline: 4px solid var(--brand); outline-offset: 3px; z-index: 40; }
+.note.selected .del { display: block; width: 40px; height: 40px; top: -16px; right: -16px; font-size: 18px; line-height: 40px;
+  background: #dc2626; color: #fff; box-shadow: 0 2px 6px rgba(0,0,0,.3); }
 @keyframes pop { from { transform: scale(.4) rotate(var(--tilt,0deg)); opacity: 0; } }
 
 @media print {

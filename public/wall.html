@@ -31,6 +31,7 @@
       <button id="toggleQr" class="secondary">Hide QR</button>
       <button id="bigQr" class="secondary">Big QR</button>
       <button id="full" class="secondary">Full screen</button>
+      <button id="saveImg" class="secondary">🖼 Save image</button>
       <button id="printBtn" class="secondary">🖨 Print / Save PDF</button>
       <a id="export" class="btn secondary">💾 Download</a>
       <button id="newWall">➕ New wall</button>
@@ -124,7 +125,12 @@ function enableDrag(el, n) {
     };
     const up = () => {
       el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up);
-      if (!moved) return;
+      if (!moved) { // a tap: select the note so the delete button shows (works on touch screens)
+        const was = el.classList.contains('selected');
+        board.querySelectorAll('.note.selected').forEach((x) => x.classList.remove('selected'));
+        if (!was) el.classList.add('selected');
+        return;
+      }
       n.x = el.offsetLeft / Math.max(1, board.clientWidth - W); n.y = el.offsetTop;
       fetch(`/api/walls/${CODE}/notes/${n.id}`, { method: 'PATCH', body: JSON.stringify({ x: n.x, y: n.y }) });
       layout();
@@ -172,7 +178,84 @@ closeBig.onclick = () => { bigBox.hidden = true; };
 full.onclick = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
 printBtn.onclick = () => window.print();
 newWall.onclick = () => { location.href = '/'; };
+
+// ---- Save the whole wall as one PNG picture ----
+const loadImg = (src) => new Promise((ok) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => ok(null); i.src = src; });
+function wrapLines(ctx, text, maxW) {
+  const lines = [];
+  for (const para of text.split('\n')) {
+    let line = '';
+    for (const word of para.split(/(\s+)/)) {
+      // long words / CJK text without spaces: break by character
+      for (const piece of ctx.measureText(word).width > maxW ? [...word] : [word]) {
+        if (ctx.measureText(line + piece).width > maxW && line.trim()) { lines.push(line.trim()); line = piece.trimStart(); }
+        else line += piece;
+      }
+    }
+    lines.push(line.trim());
+  }
+  return lines;
+}
+async function saveImage() {
+  saveImg.disabled = true; saveImg.textContent = 'Saving…';
+  try {
+    const font = getComputedStyle(document.body).fontFamily;
+    const pad = 40, headH = wall.prompt ? 120 : 80;
+    // crop to the notes and the title instead of the full screen width
+    const els = [...board.querySelectorAll('.note')];
+    const m = document.createElement('canvas').getContext('2d');
+    m.font = `bold 34px ${font}`; let textW = m.measureText(wall.title).width;
+    m.font = `22px ${font}`; textW = Math.max(textW, m.measureText(wall.prompt || '').width);
+    const boardW = Math.max(W, textW, ...els.map((e) => e.offsetLeft + e.offsetWidth + 10));
+    const boardH = Math.max(H, ...els.map((e) => e.offsetTop + e.offsetHeight + 10));
+    const scale = 2;
+    const c = document.createElement('canvas');
+    c.width = (boardW + pad * 2) * scale; c.height = (boardH + headH + pad * 2) * scale;
+    const ctx = c.getContext('2d');
+    ctx.scale(scale, scale);
+    ctx.fillStyle = '#fdfcf7'; ctx.fillRect(0, 0, c.width, c.height);
+    ctx.fillStyle = '#1f2937'; ctx.font = `bold 34px ${font}`; ctx.textBaseline = 'top';
+    ctx.fillText(wall.title, pad, pad);
+    if (wall.prompt) { ctx.fillStyle = '#4b5563'; ctx.font = `22px ${font}`; ctx.fillText(wall.prompt, pad, pad + 48); }
+    ctx.fillStyle = '#9ca3af'; ctx.font = `15px ${font}`;
+    ctx.fillText(`${notes.length} notes · ${new Date().toLocaleDateString()}`, pad, pad + (wall.prompt ? 84 : 48));
+    const top0 = pad + headH;
+    for (const n of notes) {
+      const el = board.querySelector(`[data-id="${n.id}"]`);
+      if (!el) continue;
+      const x = pad + el.offsetLeft, y = top0 + el.offsetTop, w = el.offsetWidth, h = el.offsetHeight;
+      ctx.save();
+      ctx.translate(x + w / 2, y + h / 2); ctx.rotate(parseFloat(tilt(n.id)) * Math.PI / 180); ctx.translate(-w / 2, -h / 2);
+      ctx.shadowColor = 'rgba(0,0,0,.18)'; ctx.shadowBlur = 12; ctx.shadowOffsetY = 5;
+      ctx.fillStyle = n.color; ctx.fillRect(0, 0, w, h);
+      ctx.shadowColor = 'transparent';
+      let cy = 14;
+      if (n.drawing) {
+        const img = await loadImg(n.drawing);
+        if (img) { const iw = w - 28; ctx.drawImage(img, 14, cy, iw, iw * img.height / img.width); cy += iw * img.height / img.width + 6; }
+      }
+      if (n.text) {
+        ctx.fillStyle = '#1f2937'; ctx.font = `17px ${font}`;
+        for (const line of wrapLines(ctx, n.text, w - 28)) { ctx.fillText(line, 14, cy); cy += 23; }
+      }
+      if (n.name) { ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.font = `bold 12px ${font}`; ctx.fillText('— ' + n.name, 14, h - 20); }
+      ctx.restore();
+    }
+    const blob = await new Promise((ok) => c.toBlob(ok, 'image/png'));
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `wonder-wall-${wall.title.replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-').slice(0, 40) || CODE}.png`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  } catch (e) { alert('Could not save the image: ' + e.message); }
+  saveImg.disabled = false; saveImg.textContent = '🖼 Save image';
+}
+saveImg.onclick = saveImage;
 window.addEventListener('resize', layout);
+// Tapping empty space clears the selection.
+document.addEventListener('pointerdown', (e) => {
+  if (!e.target.closest('.note')) board.querySelectorAll('.note.selected').forEach((x) => x.classList.remove('selected'));
+});
 init();
 </script>
 </body></html>
