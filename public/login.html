@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Wonder Wall · Teacher login</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<div class="wrap" style="max-width:420px;margin-top:10vh">
+  <div class="card">
+    <div class="logo"><span>💡</span> Wonder Wall</div>
+    <p class="muted">Teacher area. Enter your PIN.</p>
+    <form id="f"><input id="pin" type="password" placeholder="Teacher PIN" autofocus>
+      <p id="err" style="color:#b91c1c"></p><button>Enter</button></form>
+    <p class="muted" style="margin-top:1.5em">Are you a student? <a href="/join">Join a wall</a></p>
+  </div>
+</div>
+<script>
+document.getElementById('f').onsubmit = async (e) => {
+  e.preventDefault();
+  const r = await fetch('/api/login', { method: 'POST', body: JSON.stringify({ pin: pin.value }) });
+  if (r.ok) return location.reload();
+  const j = await r.json().catch(() => ({}));
+  err.textContent = j.error === 'Wrong PIN' ? 'Wrong PIN, try again.' : (j.error || 'Try again.');
+};
+</script>
+</body></html>

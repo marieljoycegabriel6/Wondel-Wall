@@ -1,0 +1,17 @@
+{
+  "name": "wonder-wall",
+  "version": "1.0.0",
+  "description": "Live sticky-note wall for classrooms",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "pg": "^8.23.1",
+    "qrcode": "^1.5.4"
+  }
+}

@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Wonder Wall · Teacher</title><link rel="stylesheet" href="/style.css">
+<style>
+  .walls { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 1em; margin-top: 1em; }
+  .wall-card { background: #fff; border-radius: 14px; padding: 1em; box-shadow: 0 3px 12px rgba(76,29,149,.07); display: flex; flex-direction: column; gap: .4em; }
+  .wall-card h3 { margin: 0; }
+  .pill { font-size: .75rem; font-weight: 700; padding: .15em .6em; border-radius: 99px; background: #dcfce7; color: #166534; }
+  .pill.closed { background: #f3f4f6; color: #6b7280; }
+</style></head>
+<body>
+<div class="wrap">
+  <div class="logo"><span>💡</span> Wonder Wall</div>
+  <p class="muted">Make a wall for your lesson. Students scan the QR code and post sticky notes.</p>
+
+  <div class="card">
+    <h2>New wall</h2>
+    <form id="f">
+      <label for="title">Title</label>
+      <input id="title" placeholder="e.g. Science: What do you wonder about plants?" required>
+      <label for="promptIn">Question or instructions (optional)</label>
+      <input id="promptIn" placeholder="e.g. Write or draw one thing you wonder about.">
+      <p><button>➕ Create wall</button></p>
+    </form>
+  </div>
+
+  <h2 style="margin-top:1.5em">Saved walls</h2>
+  <p id="empty" class="muted" hidden>No walls yet. Make your first one above.</p>
+  <div class="walls" id="list"></div>
+</div>
+<script>
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+async function load() {
+  const walls = await (await fetch('/api/walls')).json();
+  empty.hidden = walls.length > 0;
+  list.innerHTML = walls.map((w) => `
+    <div class="wall-card">
+      <div class="row" style="justify-content:space-between"><strong class="muted">${w.code}</strong>
+        <span class="pill ${w.open ? '' : 'closed'}">${w.open ? 'Open' : 'Closed'}</span></div>
+      <h3>${esc(w.title)}</h3>
+      <div class="muted">${w.count} note${w.count === 1 ? '' : 's'} · ${new Date(w.createdAt).toLocaleDateString()}</div>
+      <div class="row" style="margin-top:auto">
+        <a class="btn" href="/wall/${w.code}">Open</a>
+        <button class="danger" data-del="${w.code}">Delete</button>
+      </div>
+    </div>`).join('');
+}
+list.onclick = async (e) => {
+  const code = e.target.dataset.del;
+  if (!code || !confirm('Delete this wall and all its notes? This cannot be undone.')) return;
+  await fetch('/api/walls/' + code, { method: 'DELETE' });
+  load();
+};
+f.onsubmit = async (e) => {
+  e.preventDefault();
+  const r = await fetch('/api/walls', { method: 'POST', body: JSON.stringify({ title: title.value, prompt: promptIn.value }) });
+  const w = await r.json();
+  location.href = '/wall/' + w.code;
+};
+load();
+</script>
+</body></html>

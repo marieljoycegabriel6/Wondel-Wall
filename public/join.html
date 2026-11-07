@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Join a Wonder Wall</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<div class="wrap" style="max-width:420px;margin-top:10vh">
+  <div class="card">
+    <div class="logo"><span>💡</span> Wonder Wall</div>
+    <p class="muted">Type the 5-letter code on the screen.</p>
+    <form id="f"><input id="code" maxlength="5" autocapitalize="characters" placeholder="e.g. K7QXM"
+      style="font-size:1.6rem;text-align:center;letter-spacing:.3em;text-transform:uppercase" autofocus>
+      <p id="err" style="color:#b91c1c"></p><button style="width:100%">Join</button></form>
+  </div>
+</div>
+<script>
+document.getElementById('f').onsubmit = async (e) => {
+  e.preventDefault();
+  const c = code.value.trim().toUpperCase();
+  const r = await fetch('/api/walls/' + c + '/info');
+  if (r.ok) location.href = '/s/' + c; else err.textContent = 'No wall with that code.';
+};
+</script>
+</body></html>

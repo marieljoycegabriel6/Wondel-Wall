@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Wonder Wall</title><link rel="stylesheet" href="/style.css">
+<style>
+  body { background: #fdfcf7 radial-gradient(#e7e1cf 1px, transparent 1px) 0 0 / 22px 22px; min-height: 100vh; }
+  header { display: flex; gap: 1.2em; padding: 1em 1.4em; align-items: flex-start; }
+  header .info { flex: 1; min-width: 0; }
+  header h1 { font-size: 2rem; }
+  header .prompt { font-size: 1.25rem; color: #4b5563; }
+  .toolbar { margin-top: .8em; }
+  .toolbar button, .toolbar .btn { padding: .45em .9em; font-size: .95rem; }
+  .qr { background: #fff; border-radius: 16px; padding: 12px; text-align: center; box-shadow: 0 4px 18px rgba(0,0,0,.1); }
+  .qr img { width: 190px; height: 190px; display: block; }
+  .qr .code { font-size: 1.7rem; font-weight: 800; letter-spacing: .15em; color: var(--brand); }
+  .qr .link { font-size: .8rem; color: var(--muted); max-width: 190px; word-break: break-all; }
+  .closed-banner { background: #fef3c7; color: #92400e; font-weight: 700; padding: .4em .8em; border-radius: 8px; display: inline-block; }
+  #board { position: relative; margin: 0 1em 2em; min-height: 60vh; }
+  #count { font-weight: 700; }
+  .big-qr { position: fixed; inset: 0; background: rgba(255,255,255,.97); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 100; gap: 1em; }
+  .big-qr img { width: min(70vh, 80vw); height: min(70vh, 80vw); }
+  .big-qr .code { font-size: 3rem; font-weight: 800; letter-spacing: .2em; color: var(--brand); }
+</style></head>
+<body>
+<header>
+  <div class="info">
+    <h1 id="title">…</h1>
+    <div class="prompt" id="promptEl"></div>
+    <div class="toolbar row no-print">
+      <a class="btn secondary" href="/">← All walls</a>
+      <button id="toggleOpen" class="secondary"></button>
+      <button id="toggleQr" class="secondary">Hide QR</button>
+      <button id="bigQr" class="secondary">Big QR</button>
+      <button id="full" class="secondary">Full screen</button>
+      <button id="printBtn" class="secondary">🖨 Print / Save PDF</button>
+      <a id="export" class="btn secondary">💾 Download</a>
+      <button id="newWall">➕ New wall</button>
+    </div>
+    <p class="muted"><span id="count">0</span> notes <span id="closedEl" class="closed-banner" hidden>Posting is closed</span></p>
+  </div>
+  <div class="qr" id="qrBox">
+    <div class="muted" style="font-weight:600">Scan to post</div>
+    <img id="qrImg" alt="QR code to join">
+    <div class="code" id="code"></div>
+    <div class="link" id="link"></div>
+  </div>
+</header>
+<div id="board"></div>
+<div class="big-qr no-print" id="bigBox" hidden>
+  <h1 id="bigTitle"></h1>
+  <img id="bigImg" alt="QR code to join">
+  <div class="muted" id="bigLink"></div>
+  <div class="code" id="bigCode"></div>
+  <button id="closeBig">Close</button>
+</div>
+<script>
+const CODE = location.pathname.split('/').pop();
+const W = 200, H = 175, GAP = 18;
+let wall, notes = [];
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const tilt = (id) => ((parseInt(id.slice(0, 4), 16) % 7) - 3) + 'deg';
+
+function renderHeader() {
+  document.title = wall.title + ' · Wonder Wall';
+  title.textContent = bigTitle.textContent = wall.title;
+  promptEl.textContent = wall.prompt || '';
+  code.textContent = bigCode.textContent = wall.code;
+  link.textContent = bigLink.textContent = wall.joinUrl;
+  qrImg.src = bigImg.src = `/api/walls/${CODE}/qr.svg`;
+  toggleOpen.textContent = wall.open ? '🔒 Close posting' : '🔓 Open posting';
+  closedEl.hidden = wall.open;
+  exportBtn.href = `/api/walls/${CODE}/export`;
+}
+const exportBtn = document.getElementById('export');
+
+function noteEl(n) {
+  const el = document.createElement('div');
+  el.className = 'note';
+  el.dataset.id = n.id;
+  el.style.background = n.color;
+  el.style.setProperty('--tilt', tilt(n.id));
+  el.innerHTML = (n.drawing ? `<img src="${n.drawing}" alt="drawing">` : '') +
+    (n.text ? `<div class="text">${esc(n.text)}</div>` : '') +
+    (n.name ? `<div class="who">— ${esc(n.name)}</div>` : '') +
+    `<button class="del no-print" title="Remove note">✕</button>`;
+  el.querySelector('.del').onclick = async (e) => {
+    e.stopPropagation();
+    if (confirm('Remove this note?')) await fetch(`/api/walls/${CODE}/notes/${n.id}`, { method: 'DELETE' });
+  };
+  enableDrag(el, n);
+  return el;
+}
+
+// Notes the teacher hasn't moved are laid out in a grid; moved notes keep their spot.
+function layout() {
+  const width = board.clientWidth;
+  const cols = Math.max(1, Math.floor((width + GAP) / (W + GAP)));
+  let slot = 0, maxBottom = 0;
+  for (const n of notes) {
+    const el = board.querySelector(`[data-id="${n.id}"]`);
+    if (!el) continue;
+    let left, top;
+    if (n.x == null) {
+      left = (slot % cols) * (W + GAP); top = Math.floor(slot / cols) * (H + GAP); slot++;
+    } else { left = n.x * Math.max(0, width - W); top = n.y; }
+    el.style.left = left + 'px'; el.style.top = top + 'px';
+    maxBottom = Math.max(maxBottom, top + el.offsetHeight);
+  }
+  board.style.height = (maxBottom + 40) + 'px';
+  count.textContent = notes.length;
+}
+
+function enableDrag(el, n) {
+  el.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('.del')) return;
+    el.setPointerCapture(e.pointerId);
+    const startX = e.clientX, startY = e.clientY;
+    const ox = el.offsetLeft, oy = el.offsetTop;
+    let moved = false;
+    const move = (ev) => {
+      const dx = ev.clientX - startX, dy = ev.clientY - startY;
+      if (Math.abs(dx) + Math.abs(dy) > 4) moved = true;
+      el.style.left = Math.max(0, Math.min(board.clientWidth - W, ox + dx)) + 'px';
+      el.style.top = Math.max(0, oy + dy) + 'px';
+    };
+    const up = () => {
+      el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up);
+      if (!moved) return;
+      n.x = el.offsetLeft / Math.max(1, board.clientWidth - W); n.y = el.offsetTop;
+      fetch(`/api/walls/${CODE}/notes/${n.id}`, { method: 'PATCH', body: JSON.stringify({ x: n.x, y: n.y }) });
+      layout();
+    };
+    el.addEventListener('pointermove', move); el.addEventListener('pointerup', up);
+  });
+}
+
+function addNote(n) {
+  if (notes.some((x) => x.id === n.id)) return;
+  notes.push(n);
+  board.appendChild(noteEl(n));
+  const img = board.querySelector(`[data-id="${n.id}"] img`);
+  if (img) img.onload = layout;
+  layout();
+}
+
+async function init() {
+  const r = await fetch('/api/walls/' + CODE);
+  if (!r.ok) { document.body.innerHTML = '<div class="wrap"><h1>Wall not found</h1><a href="/">Back</a></div>'; return; }
+  wall = await r.json();
+  renderHeader();
+  wall.notes.forEach(addNote);
+  const es = new EventSource(`/api/walls/${CODE}/events`);
+  es.addEventListener('note', (e) => addNote(JSON.parse(e.data)));
+  es.addEventListener('remove', (e) => {
+    const { id } = JSON.parse(e.data);
+    notes = notes.filter((n) => n.id !== id);
+    board.querySelector(`[data-id="${id}"]`)?.remove(); layout();
+  });
+  es.addEventListener('move', (e) => {
+    const m = JSON.parse(e.data), n = notes.find((x) => x.id === m.id);
+    if (n) { n.x = m.x; n.y = m.y; layout(); }
+  });
+  es.addEventListener('wall', (e) => { Object.assign(wall, JSON.parse(e.data)); renderHeader(); });
+}
+
+toggleOpen.onclick = async () => {
+  const r = await fetch('/api/walls/' + CODE, { method: 'PATCH', body: JSON.stringify({ open: !wall.open }) });
+  Object.assign(wall, await r.json()); renderHeader();
+};
+toggleQr.onclick = () => { qrBox.hidden = !qrBox.hidden; toggleQr.textContent = qrBox.hidden ? 'Show QR' : 'Hide QR'; layout(); };
+bigQr.onclick = () => { bigBox.hidden = false; };
+closeBig.onclick = () => { bigBox.hidden = true; };
+full.onclick = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+printBtn.onclick = () => window.print();
+newWall.onclick = () => { location.href = '/'; };
+window.addEventListener('resize', layout);
+init();
+</script>
+</body></html>

@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Wonder Wall</title><link rel="stylesheet" href="/style.css">
+<style>
+  .wrap { max-width: 520px; padding: 1em; }
+  .tabs { display: flex; background: #ede9fe; border-radius: 12px; padding: 4px; margin: 1em 0 .6em; }
+  .tabs button { flex: 1; background: transparent; color: var(--brand); font-weight: 700; }
+  .tabs button.on { background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,.08); }
+  .paper { border-radius: 6px; box-shadow: 0 6px 16px rgba(0,0,0,.12); padding: 10px; transition: background .2s; }
+  .paper textarea { background: transparent; border: 0; min-height: 210px; font-size: 1.25rem; resize: none; }
+  canvas { width: 100%; aspect-ratio: 1 / 1; display: block; touch-action: none; border-radius: 4px; background: transparent; }
+  .swatch { width: 34px; height: 34px; border-radius: 50%; border: 3px solid #fff; box-shadow: 0 0 0 2px #ddd; padding: 0; }
+  .swatch.on { box-shadow: 0 0 0 3px var(--brand); }
+  .tools { margin: .6em 0; gap: .4em; }
+  .tools button.tool { background: #fff; color: var(--ink); border: 2px solid #e5e7eb; padding: .35em .7em; }
+  .tools button.tool.on { border-color: var(--brand); color: var(--brand); }
+  #postBtn { width: 100%; font-size: 1.2rem; padding: .8em; margin-top: 1em; }
+  .done { text-align: center; padding: 3em 1em; }
+  .done .big { font-size: 4rem; }
+</style></head>
+<body>
+<div class="wrap">
+  <div class="logo" style="font-size:1.3rem"><span>💡</span> Wonder Wall</div>
+  <div id="main" hidden>
+    <h1 id="wTitle" style="font-size:1.5rem;margin-top:.4em"></h1>
+    <p id="wPrompt" class="muted"></p>
+
+    <label for="who">Your name (optional)</label>
+    <input id="who" maxlength="40" placeholder="Your name">
+
+    <label>Sticky note colour</label>
+    <div class="row" id="noteColors"></div>
+
+    <div class="tabs"><button id="tabType" class="on">⌨️ Type</button><button id="tabDraw">✏️ Write / Draw</button></div>
+
+    <div class="paper" id="paper">
+      <textarea id="text" maxlength="500" placeholder="Type your idea here…"></textarea>
+      <canvas id="pad" hidden></canvas>
+    </div>
+
+    <div id="drawTools" hidden>
+      <div class="row tools" id="penColors"></div>
+      <div class="row tools">
+        <button class="tool on" data-size="4">Thin</button>
+        <button class="tool" data-size="9">Thick</button>
+        <button class="tool" id="eraser">Eraser</button>
+        <button class="tool" id="undo">↶ Undo</button>
+        <button class="tool" id="clear">Clear</button>
+      </div>
+    </div>
+
+    <p id="err" style="color:#b91c1c"></p>
+    <button id="postBtn">📌 Post it!</button>
+  </div>
+
+  <div id="done" class="done" hidden>
+    <div class="big">🎉</div>
+    <h2>Posted!</h2>
+    <p class="muted">Look at the screen to see your note.</p>
+    <button id="again">Post another</button>
+  </div>
+  <div id="msg" class="done" hidden></div>
+</div>
+<script>
+const CODE = location.pathname.split('/').pop().toUpperCase();
+const NOTE_COLORS = ['#fff475', '#ffb3c7', '#a7f3d0', '#bfdbfe', '#fed7aa', '#ddd6fe'];
+const PEN_COLORS = ['#111827', '#dc2626', '#2563eb', '#16a34a', '#9333ea', '#ea580c'];
+let noteColor = localStorage.ww_color || NOTE_COLORS[0];
+let mode = 'type', penColor = PEN_COLORS[0], penSize = 4, erasing = false;
+const strokes = []; // for undo
+let drawn = false;
+
+function showMsg(html) { main.hidden = true; done.hidden = true; msg.hidden = false; msg.innerHTML = html; }
+
+// ----- colours -----
+function swatches(box, colors, current, onPick) {
+  box.innerHTML = '';
+  for (const c of colors) {
+    const b = document.createElement('button');
+    b.className = 'swatch' + (c === current ? ' on' : ''); b.style.background = c; b.type = 'button';
+    b.onclick = () => { box.querySelectorAll('.swatch').forEach((s) => s.classList.remove('on')); b.classList.add('on'); onPick(c); };
+    box.appendChild(b);
+  }
+}
+swatches(noteColors, NOTE_COLORS, noteColor, (c) => { noteColor = c; localStorage.ww_color = c; paper.style.background = c; });
+swatches(penColors, PEN_COLORS, penColor, (c) => { penColor = c; erasing = false; eraser.classList.remove('on'); });
+paper.style.background = noteColor;
+who.value = localStorage.ww_name || '';
+
+// ----- tabs -----
+function setMode(m) {
+  mode = m;
+  tabType.classList.toggle('on', m === 'type'); tabDraw.classList.toggle('on', m === 'draw');
+  text.hidden = m !== 'type'; pad.hidden = drawTools.hidden = m !== 'draw';
+  if (m === 'draw') sizeCanvas();
+}
+tabType.onclick = () => setMode('type');
+tabDraw.onclick = () => setMode('draw');
+
+// ----- drawing -----
+const ctx = pad.getContext('2d');
+function sizeCanvas() {
+  const r = pad.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  const w = Math.round(r.width * dpr);
+  if (pad.width === w) return;
+  pad.width = pad.height = w;
+  redraw();
+}
+function strokeOut(s) {
+  const k = pad.width; // points are stored 0..1 so they survive resizes
+  ctx.globalCompositeOperation = s.erase ? 'destination-out' : 'source-over';
+  ctx.strokeStyle = s.color; ctx.lineWidth = s.size * k / 300; ctx.lineCap = ctx.lineJoin = 'round';
+  ctx.beginPath();
+  s.pts.forEach((p, i) => (i ? ctx.lineTo(p[0] * k, p[1] * k) : ctx.moveTo(p[0] * k, p[1] * k)));
+  if (s.pts.length === 1) ctx.lineTo(s.pts[0][0] * k + .1, s.pts[0][1] * k);
+  ctx.stroke();
+}
+function redraw() { ctx.clearRect(0, 0, pad.width, pad.height); strokes.forEach(strokeOut); ctx.globalCompositeOperation = 'source-over'; }
+const pt = (e) => { const r = pad.getBoundingClientRect(); return [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height]; };
+let cur = null;
+pad.addEventListener('pointerdown', (e) => {
+  pad.setPointerCapture(e.pointerId);
+  cur = { color: penColor, size: erasing ? penSize * 4 : penSize, erase: erasing, pts: [pt(e)] };
+  strokes.push(cur); drawn = true; redraw();
+});
+pad.addEventListener('pointermove', (e) => { if (!cur) return; cur.pts.push(pt(e)); redraw(); });
+const end = () => { cur = null; };
+pad.addEventListener('pointerup', end); pad.addEventListener('pointercancel', end);
+document.querySelectorAll('[data-size]').forEach((b) => b.onclick = () => {
+  document.querySelectorAll('[data-size]').forEach((x) => x.classList.remove('on')); b.classList.add('on'); penSize = +b.dataset.size;
+});
+eraser.onclick = () => { erasing = !erasing; eraser.classList.toggle('on', erasing); };
+undo.onclick = () => { strokes.pop(); drawn = strokes.some((s) => !s.erase); redraw(); };
+clear.onclick = () => { strokes.length = 0; drawn = false; redraw(); };
+window.addEventListener('resize', () => mode === 'draw' && sizeCanvas());
+
+function drawingPng() {
+  if (!drawn || !strokes.some((s) => !s.erase)) return '';
+  const out = document.createElement('canvas'); out.width = out.height = 400; // keep it small
+  out.getContext('2d').drawImage(pad, 0, 0, 400, 400);
+  return out.toDataURL('image/png');
+}
+
+// ----- post -----
+postBtn.onclick = async () => {
+  err.textContent = '';
+  const body = { name: who.value.trim(), color: noteColor, text: text.value.trim(), drawing: drawingPng() };
+  if (!body.text && !body.drawing) { err.textContent = 'Type or draw something first.'; return; }
+  localStorage.ww_name = body.name;
+  postBtn.disabled = true; postBtn.textContent = 'Posting…';
+  try {
+    const r = await fetch(`/api/walls/${CODE}/notes`, { method: 'POST', body: JSON.stringify(body) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Could not post');
+    text.value = ''; strokes.length = 0; drawn = false; redraw();
+    main.hidden = true; done.hidden = false;
+  } catch (e) { err.textContent = e.message; }
+  postBtn.disabled = false; postBtn.textContent = '📌 Post it!';
+};
+again.onclick = () => { done.hidden = true; main.hidden = false; if (mode === 'draw') sizeCanvas(); };
+
+(async () => {
+  const r = await fetch(`/api/walls/${CODE}/info`);
+  if (!r.ok) return showMsg('<h2>Wall not found</h2><p class="muted">Check the code and try again.</p><a class="btn" href="/join">Enter a code</a>');
+  const w = await r.json();
+  document.title = w.title + ' · Wonder Wall';
+  wTitle.textContent = w.title; wPrompt.textContent = w.prompt || '';
+  if (!w.open) return showMsg(`<h2>${wTitle.innerHTML}</h2><p class="muted">This wall is closed. Ask your teacher.</p>`);
+  main.hidden = false;
+})();
+</script>
+</body></html>
