@@ -17,61 +17,98 @@ const MAX_BODY = 2 * 1024 * 1024; // 2 MB (drawings are PNG data URLs)
 
 // ---------- storage ----------
 // Uses Postgres when DATABASE_URL is set (online hosting); otherwise JSON files in DATA_DIR.
-const walls = new Map(); // code -> wall
+// Only a small summary of every wall stays in memory. Full walls (with drawings) are loaded
+// when opened and unloaded again after a while, so memory stays small however many walls you save.
+const summaries = new Map(); // code -> { code, title, prompt, createdAt, open, count }
+const cache = new Map();     // code -> { wall, used }
+const loading = new Map();   // code -> Promise<wall|null>
 const db = process.env.DATABASE_URL
   ? new (require('pg').Pool)({ connectionString: process.env.DATABASE_URL, max: 3 })
   : null;
+const summary = (w) => ({
+  code: w.code, title: w.title, prompt: w.prompt, createdAt: w.createdAt,
+  open: w.open, count: w.notes.length,
+});
+const fileOf = (code) => path.join(DATA_DIR, code + '.json');
 
-async function loadWalls() {
+async function loadSummaries() {
   if (db) {
     await db.query('CREATE TABLE IF NOT EXISTS walls (code text PRIMARY KEY, data jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now())');
-    const { rows } = await db.query('SELECT data FROM walls');
-    for (const r of rows) walls.set(r.data.code, r.data);
+    const { rows } = await db.query(`SELECT code, data->>'title' AS title, data->>'prompt' AS prompt,
+      (data->>'createdAt')::bigint AS "createdAt", (data->>'open')::boolean AS open,
+      jsonb_array_length(data->'notes') AS count FROM walls`);
+    for (const r of rows) summaries.set(r.code, { ...r, createdAt: Number(r.createdAt), prompt: r.prompt || '' });
     return;
   }
   fs.mkdirSync(DATA_DIR, { recursive: true });
   for (const f of fs.readdirSync(DATA_DIR)) {
     if (!f.endsWith('.json')) continue;
-    try {
-      const w = JSON.parse(fs.readFileSync(path.join(DATA_DIR, f), 'utf8'));
-      walls.set(w.code, w);
-    } catch (e) { console.error('Could not read', f, e.message); }
+    try { const w = JSON.parse(fs.readFileSync(path.join(DATA_DIR, f), 'utf8')); summaries.set(w.code, summary(w)); }
+    catch (e) { console.error('Could not read', f, e.message); }
   }
 }
-const saveTimers = new Map();
+async function getWall(code) {
+  code = String(code).toUpperCase();
+  const hit = cache.get(code);
+  if (hit) { hit.used = Date.now(); return hit.wall; }
+  if (!summaries.has(code)) return null;
+  if (!loading.has(code)) {
+    loading.set(code, (async () => {
+      let w = null;
+      if (db) { const { rows } = await db.query('SELECT data FROM walls WHERE code = $1', [code]); w = rows[0]?.data || null; }
+      else { try { w = JSON.parse(await fs.promises.readFile(fileOf(code), 'utf8')); } catch {} }
+      if (w && summaries.has(code)) cache.set(code, { wall: w, used: Date.now() });
+      return w;
+    })().finally(() => loading.delete(code)));
+  }
+  return loading.get(code);
+}
+const saveTimers = new Map(); // code -> { timer, wall }
+function writeWall(w) {
+  if (!summaries.has(w.code)) return Promise.resolve(); // deleted meanwhile
+  if (db) {
+    return db.query('INSERT INTO walls (code, data) VALUES ($1, $2) ON CONFLICT (code) DO UPDATE SET data = EXCLUDED.data, updated_at = now()',
+      [w.code, JSON.stringify(w)]).catch((e) => console.error('save failed', e.message));
+  }
+  const file = fileOf(w.code);
+  return fs.promises.writeFile(file + '.tmp', JSON.stringify(w))
+    .then(() => fs.promises.rename(file + '.tmp', file)).catch((e) => console.error('save failed', e.message));
+}
 function saveWall(w) {
-  clearTimeout(saveTimers.get(w.code));
-  saveTimers.set(w.code, setTimeout(() => {
-    saveTimers.delete(w.code);
-    if (!walls.has(w.code)) return; // deleted meanwhile
-    if (db) {
-      return db.query('INSERT INTO walls (code, data) VALUES ($1, $2) ON CONFLICT (code) DO UPDATE SET data = EXCLUDED.data, updated_at = now()',
-        [w.code, JSON.stringify(w)]).catch((e) => console.error('save failed', e.message));
-    }
-    const file = path.join(DATA_DIR, w.code + '.json');
-    fs.writeFile(file + '.tmp', JSON.stringify(w), (err) => {
-      if (err) return console.error(err);
-      fs.rename(file + '.tmp', file, () => {});
-    });
-  }, 300));
+  summaries.set(w.code, summary(w));
+  clearTimeout(saveTimers.get(w.code)?.timer);
+  saveTimers.set(w.code, { wall: w, timer: setTimeout(() => { saveTimers.delete(w.code); writeWall(w); }, 300) });
 }
+// When the host restarts the app (e.g. a new deploy), save anything still waiting first.
+let shuttingDown = false;
+async function shutdown() {
+  if (shuttingDown) return; shuttingDown = true;
+  const pending = [...saveTimers.values()]; saveTimers.clear();
+  pending.forEach((p) => clearTimeout(p.timer));
+  await Promise.all(pending.map((p) => writeWall(p.wall)));
+  if (db) await db.end().catch(() => {});
+  process.exit(0);
+}
+process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
 function removeWall(code) {
-  walls.delete(code);
-  clearTimeout(saveTimers.get(code));
+  summaries.delete(code); cache.delete(code);
+  clearTimeout(saveTimers.get(code)?.timer); saveTimers.delete(code);
   if (db) return db.query('DELETE FROM walls WHERE code = $1', [code]).catch((e) => console.error(e.message));
-  fs.rm(path.join(DATA_DIR, code + '.json'), { force: true }, () => {});
+  fs.rm(fileOf(code), { force: true }, () => {});
 }
+// Unload walls nobody has used for 20 minutes (never one that is open on a screen or still saving).
+const IDLE_MS = Number(process.env.WALL_IDLE_MS) || 20 * 60 * 1000;
+setInterval(() => {
+  for (const [code, c] of cache)
+    if (Date.now() - c.used > IDLE_MS && !listeners.get(code)?.size && !saveTimers.has(code)) cache.delete(code);
+}, Math.min(IDLE_MS, 60 * 1000));
 function newCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let c;
   do { c = Array.from(crypto.randomBytes(5), (b) => chars[b % chars.length]).join(''); }
-  while (walls.has(c));
+  while (summaries.has(c));
   return c;
 }
-const summary = (w) => ({
-  code: w.code, title: w.title, prompt: w.prompt, createdAt: w.createdAt,
-  open: w.open, count: w.notes.length,
-});
 
 // ---------- live updates (Server-Sent Events) ----------
 const listeners = new Map(); // code -> Set(res)
@@ -156,12 +193,12 @@ const server = http.createServer(async (req, res) => {
 
     // Student-facing (public) API
     if ((r = m(/^\/api\/walls\/([A-Za-z0-9]{5})\/info$/)) && req.method === 'GET') {
-      const w = walls.get(r[1].toUpperCase());
+      const w = summaries.get(r[1].toUpperCase()); // no need to load the drawings
       if (!w) return send(res, 404, { error: 'Wall not found' });
       return send(res, 200, { code: w.code, title: w.title, prompt: w.prompt, open: w.open });
     }
     if ((r = m(/^\/api\/walls\/([A-Za-z0-9]{5})\/notes$/)) && req.method === 'POST') {
-      const w = walls.get(r[1].toUpperCase());
+      const w = await getWall(r[1]);
       if (!w) return send(res, 404, { error: 'Wall not found' });
       if (!w.open) return send(res, 403, { error: 'This wall is closed.' });
       const b = await readBody(req);
@@ -185,18 +222,18 @@ const server = http.createServer(async (req, res) => {
     if (p.startsWith('/api/') && !isTeacher(req)) return send(res, 401, { error: 'Teacher login required' });
 
     if (p === '/api/walls' && req.method === 'GET')
-      return send(res, 200, [...walls.values()].sort((a, b) => b.createdAt - a.createdAt).map(summary));
+      return send(res, 200, [...summaries.values()].sort((a, b) => b.createdAt - a.createdAt));
 
     if (p === '/api/walls' && req.method === 'POST') {
       const b = await readBody(req);
       const w = { code: newCode(), title: clean(b.title, 80) || 'Wonder Wall', prompt: clean(b.prompt, 200), createdAt: Date.now(), open: true, notes: [] };
-      walls.set(w.code, w);
+      cache.set(w.code, { wall: w, used: Date.now() });
       saveWall(w);
       return send(res, 201, summary(w));
     }
 
     if ((r = m(/^\/api\/walls\/([A-Z0-9]{5})$/))) {
-      const w = walls.get(r[1]);
+      const w = await getWall(r[1]);
       if (!w) return send(res, 404, { error: 'Wall not found' });
       if (req.method === 'GET') return send(res, 200, { ...w, joinUrl: `${baseUrl(req)}/s/${w.code}` });
       if (req.method === 'PATCH') {
@@ -215,7 +252,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if ((r = m(/^\/api\/walls\/([A-Z0-9]{5})\/notes\/([\w-]+)$/))) {
-      const w = walls.get(r[1]);
+      const w = await getWall(r[1]);
       const note = w && w.notes.find((n) => n.id === r[2]);
       if (!note) return send(res, 404, { error: 'Note not found' });
       if (req.method === 'DELETE') {
@@ -237,7 +274,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if ((r = m(/^\/api\/walls\/([A-Z0-9]{5})\/events$/)) && req.method === 'GET') {
-      if (!walls.has(r[1])) return send(res, 404, { error: 'Wall not found' });
+      if (!summaries.has(r[1])) return send(res, 404, { error: 'Wall not found' });
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
       res.write(': connected\n\n');
       if (!listeners.has(r[1])) listeners.set(r[1], new Set());
@@ -247,7 +284,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if ((r = m(/^\/api\/walls\/([A-Z0-9]{5})\/export$/)) && req.method === 'GET') {
-      const w = walls.get(r[1]);
+      const w = await getWall(r[1]);
       if (!w) return send(res, 404, { error: 'Wall not found' });
       res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': `attachment; filename="wonder-wall-${w.code}.json"` });
       return res.end(JSON.stringify(w, null, 2));
@@ -259,7 +296,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-loadWalls().then(() => server.listen(PORT, () => {
+loadSummaries().then(() => server.listen(PORT, () => {
   console.log(`\nWonder Wall is running!`);
   console.log(`  Teacher (this computer):  http://localhost:${PORT}`);
   console.log(`  Same Wi-Fi devices:       http://${lanAddress()}:${PORT}`);

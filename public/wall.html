@@ -36,7 +36,7 @@
       <a id="export" class="btn secondary">💾 Download</a>
       <button id="newWall">➕ New wall</button>
     </div>
-    <p class="muted"><span id="count">0</span> notes <span id="closedEl" class="closed-banner" hidden>Posting is closed</span></p>
+    <p class="muted"><span id="count">0</span> notes <span id="liveDot" class="no-print" style="margin-left:.8em;font-weight:600"></span> <span id="closedEl" class="closed-banner" hidden>Posting is closed</span></p>
   </div>
   <div class="qr" id="qrBox">
     <div class="muted" style="font-weight:600">Scan to post</div>
@@ -148,24 +148,67 @@ function addNote(n) {
   layout();
 }
 
+function removeNote(id) {
+  notes = notes.filter((n) => n.id !== id);
+  board.querySelector(`[data-id="${id}"]`)?.remove();
+}
+
+// Bring the screen up to date with the server: adds notes that arrived while the
+// connection was down, removes deleted ones and applies moves.
+async function resync() {
+  const r = await fetch('/api/walls/' + CODE, { cache: 'no-store' });
+  if (!r.ok) throw new Error('resync failed');
+  const fresh = await r.json();
+  Object.assign(wall, fresh, { notes: undefined }); renderHeader();
+  const ids = new Set(fresh.notes.map((n) => n.id));
+  notes.filter((n) => !ids.has(n.id)).forEach((n) => removeNote(n.id));
+  for (const f of fresh.notes) {
+    const n = notes.find((x) => x.id === f.id);
+    if (n) { n.x = f.x; n.y = f.y; } else addNote(f);
+  }
+  layout();
+}
+
+function setLive(ok) {
+  liveDot.textContent = ok ? '● Live' : '● Reconnecting…';
+  liveDot.style.color = ok ? '#16a34a' : '#d97706';
+}
+
+// Live connection that heals itself: the browser retries short drops on its own; if the
+// connection closes for good (e.g. the server restarted), we reconnect ourselves.
+let es, firstOpen = true, retry = 1000;
+function connect() {
+  es = new EventSource(`/api/walls/${CODE}/events`);
+  es.onopen = () => {
+    setLive(true); retry = 1000;
+    if (firstOpen) { firstOpen = false; return; }
+    resync().catch(() => {});
+  };
+  es.onerror = () => {
+    setLive(false);
+    if (es.readyState === EventSource.CLOSED) {
+      setTimeout(connect, retry); retry = Math.min(retry * 2, 15000);
+    }
+  };
+  es.addEventListener('note', (e) => addNote(JSON.parse(e.data)));
+  es.addEventListener('remove', (e) => { removeNote(JSON.parse(e.data).id); layout(); });
+  es.addEventListener('move', (e) => {
+    const m = JSON.parse(e.data), n = notes.find((x) => x.id === m.id);
+    if (n) { n.x = m.x; n.y = m.y; layout(); }
+  });
+  es.addEventListener('wall', (e) => { Object.assign(wall, JSON.parse(e.data)); renderHeader(); });
+}
+
 async function init() {
   const r = await fetch('/api/walls/' + CODE);
   if (!r.ok) { document.body.innerHTML = '<div class="wrap"><h1>Wall not found</h1><a href="/">Back</a></div>'; return; }
   wall = await r.json();
   renderHeader();
   wall.notes.forEach(addNote);
-  const es = new EventSource(`/api/walls/${CODE}/events`);
-  es.addEventListener('note', (e) => addNote(JSON.parse(e.data)));
-  es.addEventListener('remove', (e) => {
-    const { id } = JSON.parse(e.data);
-    notes = notes.filter((n) => n.id !== id);
-    board.querySelector(`[data-id="${id}"]`)?.remove(); layout();
-  });
-  es.addEventListener('move', (e) => {
-    const m = JSON.parse(e.data), n = notes.find((x) => x.id === m.id);
-    if (n) { n.x = m.x; n.y = m.y; layout(); }
-  });
-  es.addEventListener('wall', (e) => { Object.assign(wall, JSON.parse(e.data)); renderHeader(); });
+  connect();
+  // Safety net: catch up when the laptop wakes up / the tab comes back, and every 2 minutes.
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) resync().catch(() => {}); });
+  setInterval(() => resync().catch(() => {}), 2 * 60 * 1000);
 }
 
 toggleOpen.onclick = async () => {
