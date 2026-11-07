@@ -18,6 +18,20 @@
   #count { font-weight: 700; }
   .big-qr { position: fixed; inset: 0; background: rgba(255,255,255,.97); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 100; gap: 1em; }
   .big-qr img { width: min(70vh, 80vw); height: min(70vh, 80vw); }
+  .pend-btn { position: fixed; right: 18px; bottom: 18px; z-index: 60; font-size: 1.1rem; padding: .7em 1.2em; border-radius: 99px;
+    background: #f59e0b; color: #fff; box-shadow: 0 6px 18px rgba(0,0,0,.2); }
+  .pend-panel { position: fixed; right: 18px; bottom: 80px; z-index: 61; width: min(380px, 92vw); max-height: 70vh; overflow: auto;
+    background: #fff; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,.25); padding: 1em; }
+  .pend-item { border-radius: 6px; padding: 10px; margin: .6em 0; }
+  .pend-item img { width: 100%; max-width: 220px; display: block; }
+  .pend-item .text { white-space: pre-wrap; font-size: 1.05rem; }
+  .pend-item .who { font-size: .8rem; color: rgba(0,0,0,.6); font-weight: 600; margin-top: 4px; }
+  .pend-item .row button { padding: .4em .9em; }
+  .tag { font-size: .85rem; font-weight: 700; padding: .2em .6em; border-radius: 99px; background: #fef3c7; color: #92400e; margin-left: .5em; }
+  dialog { border: 0; border-radius: 16px; padding: 1.4em; width: min(520px, 92vw); box-shadow: 0 10px 40px rgba(0,0,0,.3); }
+  dialog::backdrop { background: rgba(0,0,0,.35); }
+  .check { display: flex; gap: .6em; align-items: flex-start; font-weight: 600; margin-top: 1em; }
+  .check input { width: auto; margin-top: .25em; transform: scale(1.3); }
   .big-qr .code { font-size: 3rem; font-weight: 800; letter-spacing: .2em; color: var(--brand); }
 </style></head>
 <body>
@@ -28,6 +42,7 @@
     <div class="toolbar row no-print">
       <a class="btn secondary" href="/">← All walls</a>
       <button id="toggleOpen" class="secondary"></button>
+      <button id="editBtn" class="secondary">✏️ Edit</button>
       <button id="toggleQr" class="secondary">Hide QR</button>
       <button id="bigQr" class="secondary">Big QR</button>
       <button id="full" class="secondary">Full screen</button>
@@ -36,7 +51,7 @@
       <a id="export" class="btn secondary">💾 Download</a>
       <button id="newWall">➕ New wall</button>
     </div>
-    <p class="muted"><span id="count">0</span> notes <span id="liveDot" class="no-print" style="margin-left:.8em;font-weight:600"></span> <span id="closedEl" class="closed-banner" hidden>Posting is closed</span></p>
+    <p class="muted"><span id="count">0</span> notes <span id="liveDot" class="no-print" style="margin-left:.8em;font-weight:600"></span><span id="modTag" class="tag no-print" hidden>✋ You approve notes first</span> <span id="closedEl" class="closed-banner" hidden>Posting is closed</span></p>
   </div>
   <div class="qr" id="qrBox">
     <div class="muted" style="font-weight:600">Scan to post</div>
@@ -46,6 +61,31 @@
   </div>
 </header>
 <div id="board"></div>
+<button id="pendBtn" class="pend-btn no-print" hidden>✋ <span id="pendCount">0</span> waiting</button>
+<div id="pendPanel" class="pend-panel no-print" hidden>
+  <div class="row" style="justify-content:space-between">
+    <strong>Waiting for your OK</strong>
+    <span class="row"><button id="approveAll" style="padding:.35em .8em">✓ Approve all</button>
+    <button id="closePend" class="secondary" style="padding:.35em .8em">Close</button></span>
+  </div>
+  <p class="muted" style="font-size:.85rem;margin:.4em 0 0">Tip: the class can see this list on the projector. To check notes privately, open this wall on your phone and approve from there.</p>
+  <div id="pendList"></div>
+</div>
+<dialog id="editDlg">
+  <form id="editForm" method="dialog">
+    <h2>Edit wall</h2>
+    <label for="editTitle">Title</label>
+    <input id="editTitle" maxlength="80" required>
+    <label for="editPrompt">Question or instructions</label>
+    <input id="editPrompt" maxlength="200">
+    <label class="check"><input type="checkbox" id="editModerate">
+      <span>Approve notes before they appear on the screen<br><span class="muted" style="font-weight:400">New notes wait for your OK. Good for avoiding silly or unkind notes.</span></span></label>
+    <div class="row" style="margin-top:1.2em;justify-content:flex-end">
+      <button type="button" id="editCancel" class="secondary">Cancel</button>
+      <button id="editSave">Save</button>
+    </div>
+  </form>
+</dialog>
 <div class="big-qr no-print" id="bigBox" hidden>
   <h1 id="bigTitle"></h1>
   <img id="bigImg" alt="QR code to join">
@@ -69,6 +109,7 @@ function renderHeader() {
   qrImg.src = bigImg.src = `/api/walls/${CODE}/qr.svg`;
   toggleOpen.textContent = wall.open ? '🔒 Close posting' : '🔓 Open posting';
   closedEl.hidden = wall.open;
+  modTag.hidden = !wall.moderate;
   exportBtn.href = `/api/walls/${CODE}/export`;
 }
 const exportBtn = document.getElementById('export');
@@ -139,7 +180,46 @@ function enableDrag(el, n) {
   });
 }
 
+// ---- notes waiting for approval ----
+let pending = [];
+const isApproved = (n) => (n.status || 'approved') === 'approved';
+function renderPending() {
+  pendCount.textContent = pending.length;
+  pendBtn.hidden = pending.length === 0;
+  if (!pending.length) pendPanel.hidden = true;
+  pendList.innerHTML = '';
+  for (const n of pending) {
+    const d = document.createElement('div');
+    d.className = 'pend-item'; d.style.background = n.color;
+    d.innerHTML = (n.drawing ? `<img src="${n.drawing}" alt="drawing">` : '') +
+      (n.text ? `<div class="text">${esc(n.text)}</div>` : '') +
+      (n.name ? `<div class="who">— ${esc(n.name)}</div>` : '') +
+      `<div class="row" style="margin-top:8px"><button data-ok>✓ Show on wall</button><button data-no class="danger">✕ Reject</button></div>`;
+    d.querySelector('[data-ok]').onclick = () => approve(n.id);
+    d.querySelector('[data-no]').onclick = async () => {
+      if (confirm('Reject this note? It will be deleted.')) await fetch(`/api/walls/${CODE}/notes/${n.id}`, { method: 'DELETE' });
+    };
+    pendList.appendChild(d);
+  }
+}
+function approve(id) {
+  return fetch(`/api/walls/${CODE}/notes/${id}`, { method: 'PATCH', body: JSON.stringify({ status: 'approved' }) });
+}
+function approvedLocally(id) {
+  const n = pending.find((x) => x.id === id);
+  if (!n) return;
+  pending = pending.filter((x) => x !== n); renderPending();
+  n.status = 'approved'; addNote(n);
+}
+pendBtn.onclick = () => { pendPanel.hidden = !pendPanel.hidden; };
+closePend.onclick = () => { pendPanel.hidden = true; };
+approveAll.onclick = async () => { approveAll.disabled = true; for (const n of [...pending]) await approve(n.id); approveAll.disabled = false; };
+
 function addNote(n) {
+  if (!isApproved(n)) {
+    if (!pending.some((x) => x.id === n.id)) { pending.push(n); renderPending(); }
+    return;
+  }
   if (notes.some((x) => x.id === n.id)) return;
   notes.push(n);
   board.appendChild(noteEl(n));
@@ -149,6 +229,7 @@ function addNote(n) {
 }
 
 function removeNote(id) {
+  if (pending.some((x) => x.id === id)) { pending = pending.filter((x) => x.id !== id); renderPending(); }
   notes = notes.filter((n) => n.id !== id);
   board.querySelector(`[data-id="${id}"]`)?.remove();
 }
@@ -161,10 +242,12 @@ async function resync() {
   const fresh = await r.json();
   Object.assign(wall, fresh, { notes: undefined }); renderHeader();
   const ids = new Set(fresh.notes.map((n) => n.id));
-  notes.filter((n) => !ids.has(n.id)).forEach((n) => removeNote(n.id));
+  [...notes, ...pending].filter((n) => !ids.has(n.id)).forEach((n) => removeNote(n.id));
   for (const f of fresh.notes) {
     const n = notes.find((x) => x.id === f.id);
-    if (n) { n.x = f.x; n.y = f.y; } else addNote(f);
+    if (n) { n.x = f.x; n.y = f.y; }
+    else if (isApproved(f) && pending.some((x) => x.id === f.id)) approvedLocally(f.id);
+    else addNote(f);
   }
   layout();
 }
@@ -191,6 +274,7 @@ function connect() {
     }
   };
   es.addEventListener('note', (e) => addNote(JSON.parse(e.data)));
+  es.addEventListener('approve', (e) => approvedLocally(JSON.parse(e.data).id));
   es.addEventListener('remove', (e) => { removeNote(JSON.parse(e.data).id); layout(); });
   es.addEventListener('move', (e) => {
     const m = JSON.parse(e.data), n = notes.find((x) => x.id === m.id);
@@ -214,6 +298,18 @@ async function init() {
 toggleOpen.onclick = async () => {
   const r = await fetch('/api/walls/' + CODE, { method: 'PATCH', body: JSON.stringify({ open: !wall.open }) });
   Object.assign(wall, await r.json()); renderHeader();
+};
+editBtn.onclick = () => {
+  editTitle.value = wall.title; editPrompt.value = wall.prompt || ''; editModerate.checked = !!wall.moderate;
+  editDlg.showModal();
+};
+editCancel.onclick = () => editDlg.close();
+editForm.onsubmit = async (e) => {
+  e.preventDefault();
+  const r = await fetch('/api/walls/' + CODE, { method: 'PATCH',
+    body: JSON.stringify({ title: editTitle.value, prompt: editPrompt.value, moderate: editModerate.checked }) });
+  if (r.ok) { Object.assign(wall, await r.json()); renderHeader(); editDlg.close(); }
+  else alert('Could not save. Please try again.');
 };
 toggleQr.onclick = () => { qrBox.hidden = !qrBox.hidden; toggleQr.textContent = qrBox.hidden ? 'Show QR' : 'Hide QR'; layout(); };
 bigQr.onclick = () => { bigBox.hidden = false; };

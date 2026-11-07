@@ -6,6 +6,9 @@
   .wall-card { background: #fff; border-radius: 14px; padding: 1em; box-shadow: 0 3px 12px rgba(76,29,149,.07); display: flex; flex-direction: column; gap: .4em; }
   .wall-card h3 { margin: 0; }
   .pill { font-size: .75rem; font-weight: 700; padding: .15em .6em; border-radius: 99px; background: #dcfce7; color: #166534; }
+  .check { display: flex; gap: .6em; align-items: flex-start; font-weight: 600; margin-top: 1em; }
+  .check input { width: auto; margin-top: .25em; transform: scale(1.3); }
+  .pill.wait { background: #fef3c7; color: #92400e; }
   .pill.closed { background: #f3f4f6; color: #6b7280; }
 </style></head>
 <body>
@@ -20,6 +23,8 @@
       <input id="title" placeholder="e.g. Science: What do you wonder about plants?" required>
       <label for="promptIn">Question or instructions (optional)</label>
       <input id="promptIn" placeholder="e.g. Write or draw one thing you wonder about.">
+      <label class="check"><input type="checkbox" id="moderateIn">
+        <span>Approve notes before they appear on the screen<br><span class="muted" style="font-weight:400">New notes wait for your OK. You can change this later with ✏️ Edit.</span></span></label>
       <p><button>➕ Create wall</button></p>
     </form>
   </div>
@@ -38,14 +43,24 @@ async function load() {
       <div class="row" style="justify-content:space-between"><strong class="muted">${w.code}</strong>
         <span class="pill ${w.open ? '' : 'closed'}">${w.open ? 'Open' : 'Closed'}</span></div>
       <h3>${esc(w.title)}</h3>
-      <div class="muted">${w.count} note${w.count === 1 ? '' : 's'} · ${new Date(w.createdAt).toLocaleDateString()}</div>
+      <div class="muted">${w.count} note${w.count === 1 ? '' : 's'} · ${new Date(w.createdAt).toLocaleDateString()}
+        ${w.pending ? `<span class="pill wait">✋ ${w.pending} waiting</span>` : ''}</div>
       <div class="row" style="margin-top:auto">
         <a class="btn" href="/wall/${w.code}">Open</a>
+        <button class="secondary" data-copy="${w.code}" data-title="${esc(w.title)}" title="New empty wall with the same question">Copy</button>
         <button class="danger" data-del="${w.code}">Delete</button>
       </div>
     </div>`).join('');
 }
 list.onclick = async (e) => {
+  const copy = e.target.dataset.copy;
+  if (copy) {
+    const name = prompt('Name for the new wall (same question, no notes):', e.target.dataset.title);
+    if (name === null) return;
+    const r = await fetch(`/api/walls/${copy}/copy`, { method: 'POST', body: JSON.stringify({ title: name }) });
+    if (r.ok) location.href = '/wall/' + (await r.json()).code; else alert('Could not copy the wall.');
+    return;
+  }
   const code = e.target.dataset.del;
   if (!code || !confirm('Delete this wall and all its notes? This cannot be undone.')) return;
   await fetch('/api/walls/' + code, { method: 'DELETE' });
@@ -53,7 +68,7 @@ list.onclick = async (e) => {
 };
 f.onsubmit = async (e) => {
   e.preventDefault();
-  const r = await fetch('/api/walls', { method: 'POST', body: JSON.stringify({ title: title.value, prompt: promptIn.value }) });
+  const r = await fetch('/api/walls', { method: 'POST', body: JSON.stringify({ title: title.value, prompt: promptIn.value, moderate: moderateIn.checked }) });
   const w = await r.json();
   location.href = '/wall/' + w.code;
 };

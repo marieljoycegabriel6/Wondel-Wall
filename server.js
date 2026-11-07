@@ -25,9 +25,12 @@ const loading = new Map();   // code -> Promise<wall|null>
 const db = process.env.DATABASE_URL
   ? new (require('pg').Pool)({ connectionString: process.env.DATABASE_URL, max: 3 })
   : null;
+// Notes from before approval existed have no status: treat them as approved.
+const isApproved = (n) => (n.status || 'approved') === 'approved';
 const summary = (w) => ({
   code: w.code, title: w.title, prompt: w.prompt, createdAt: w.createdAt,
-  open: w.open, count: w.notes.length,
+  open: w.open, moderate: !!w.moderate,
+  count: w.notes.filter(isApproved).length, pending: w.notes.filter((n) => !isApproved(n)).length,
 });
 const fileOf = (code) => path.join(DATA_DIR, code + '.json');
 
@@ -36,7 +39,10 @@ async function loadSummaries() {
     await db.query('CREATE TABLE IF NOT EXISTS walls (code text PRIMARY KEY, data jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now())');
     const { rows } = await db.query(`SELECT code, data->>'title' AS title, data->>'prompt' AS prompt,
       (data->>'createdAt')::bigint AS "createdAt", (data->>'open')::boolean AS open,
-      jsonb_array_length(data->'notes') AS count FROM walls`);
+      coalesce((data->>'moderate')::boolean, false) AS moderate,
+      (SELECT count(*) FROM jsonb_array_elements(data->'notes') n WHERE coalesce(n->>'status', 'approved') = 'approved')::int AS count,
+      (SELECT count(*) FROM jsonb_array_elements(data->'notes') n WHERE coalesce(n->>'status', 'approved') <> 'approved')::int AS pending
+      FROM walls`);
     for (const r of rows) summaries.set(r.code, { ...r, createdAt: Number(r.createdAt), prompt: r.prompt || '' });
     return;
   }
@@ -195,7 +201,7 @@ const server = http.createServer(async (req, res) => {
     if ((r = m(/^\/api\/walls\/([A-Za-z0-9]{5})\/info$/)) && req.method === 'GET') {
       const w = summaries.get(r[1].toUpperCase()); // no need to load the drawings
       if (!w) return send(res, 404, { error: 'Wall not found' });
-      return send(res, 200, { code: w.code, title: w.title, prompt: w.prompt, open: w.open });
+      return send(res, 200, { code: w.code, title: w.title, prompt: w.prompt, open: w.open, moderate: !!w.moderate });
     }
     if ((r = m(/^\/api\/walls\/([A-Za-z0-9]{5})\/notes$/)) && req.method === 'POST') {
       const w = await getWall(r[1]);
@@ -210,12 +216,13 @@ const server = http.createServer(async (req, res) => {
         color: COLORS.includes(b.color) ? b.color : COLORS[0],
         createdAt: Date.now(),
         x: null, y: null,
+        status: w.moderate ? 'pending' : 'approved',
       };
       if (!note.text && !note.drawing) return send(res, 400, { error: 'Write or draw something first.' });
       w.notes.push(note);
       saveWall(w);
       broadcast(w.code, 'note', note);
-      return send(res, 201, { ok: true });
+      return send(res, 201, { ok: true, status: note.status });
     }
 
     // Everything below is teacher-only
@@ -226,7 +233,7 @@ const server = http.createServer(async (req, res) => {
 
     if (p === '/api/walls' && req.method === 'POST') {
       const b = await readBody(req);
-      const w = { code: newCode(), title: clean(b.title, 80) || 'Wonder Wall', prompt: clean(b.prompt, 200), createdAt: Date.now(), open: true, notes: [] };
+      const w = { code: newCode(), title: clean(b.title, 80) || 'Wonder Wall', prompt: clean(b.prompt, 200), createdAt: Date.now(), open: true, moderate: !!b.moderate, notes: [] };
       cache.set(w.code, { wall: w, used: Date.now() });
       saveWall(w);
       return send(res, 201, summary(w));
@@ -241,6 +248,7 @@ const server = http.createServer(async (req, res) => {
         if (typeof b.open === 'boolean') w.open = b.open;
         if (typeof b.title === 'string') w.title = clean(b.title, 80) || w.title;
         if (typeof b.prompt === 'string') w.prompt = clean(b.prompt, 200);
+        if (typeof b.moderate === 'boolean') w.moderate = b.moderate;
         saveWall(w);
         broadcast(w.code, 'wall', summary(w));
         return send(res, 200, summary(w));
@@ -260,12 +268,28 @@ const server = http.createServer(async (req, res) => {
         saveWall(w); broadcast(w.code, 'remove', { id: note.id });
         return send(res, 200, { ok: true });
       }
-      if (req.method === 'PATCH') { // move a note on the wall
+      if (req.method === 'PATCH') { // move or approve a note
         const b = await readBody(req);
+        if (b.status === 'approved' && !isApproved(note)) {
+          note.status = 'approved'; note.createdAt = Date.now();
+          w.notes = w.notes.filter((x) => x !== note).concat(note); // shows up last, like a new note
+          saveWall(w); broadcast(w.code, 'approve', { id: note.id });
+          return send(res, 200, { ok: true });
+        }
         if (Number.isFinite(b.x) && Number.isFinite(b.y)) { note.x = Math.max(0, Math.min(1, b.x)); note.y = Math.max(0, b.y); }
         saveWall(w); broadcast(w.code, 'move', { id: note.id, x: note.x, y: note.y });
         return send(res, 200, { ok: true });
       }
+    }
+
+    if ((r = m(/^\/api\/walls\/([A-Z0-9]{5})\/copy$/)) && req.method === 'POST') { // same question, empty wall
+      const src = summaries.get(r[1]);
+      if (!src) return send(res, 404, { error: 'Wall not found' });
+      const b = await readBody(req);
+      const w = { code: newCode(), title: clean(b.title, 80) || src.title, prompt: src.prompt, createdAt: Date.now(), open: true, moderate: !!src.moderate, notes: [] };
+      cache.set(w.code, { wall: w, used: Date.now() });
+      saveWall(w);
+      return send(res, 201, summary(w));
     }
 
     if ((r = m(/^\/api\/walls\/([A-Z0-9]{5})\/qr\.svg$/)) && req.method === 'GET') {
