@@ -53,4 +53,4 @@ Walls are stored as files in the `data/` folder.
 
 ## Updating the online site
 
-The Render service is linked to this GitHub repository, so every change pushed to `main` goes live automatically within a couple of minutes.
+The Render service is linked to this GitHub repository, so every change pushed to `main` goes live automatically within a couple of minutes (usually 1–2 minutes after the push).
